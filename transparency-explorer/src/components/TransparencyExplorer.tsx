@@ -1,49 +1,16 @@
-import { useEffect, useState } from "react";
+
+import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 
-const API_URL = "http://127.0.0.1:8001/api";
-
-interface Plan {
-  plan_key: string;
-  plan_name?: string;
-  name?: string;
-  state?: string;
-  plan_id?: string;
-  in_network_files?: { url: string }[];
-}
-
-interface IngestionStatus {
-  status: "pending" | "processing" | "completed" | "failed";
-  records_processed: number;
-  error_message?: string;
-}
-
-interface NegotiatedPrice {
-  negotiated_rate?: number;
-  negotiated_type?: string;
-  expiration_date?: string;
-  billing_class?: string;
-  service_code?: string[];
-  additional_information?: string;
-}
-
-interface NegotiatedRateGroup {
-  provider_references?: number[];
-  negotiated_prices?: NegotiatedPrice[];
-}
-
-interface RateRecord {
-  billing_code: string;
-  billing_code_type: string;
-  description: string;
-  negotiated_rates: NegotiatedRateGroup[];
-}
-
-interface SearchResponse {
-    unique_billing_codes: number;
-    total_negotiated_rates: number;
-    results: RateRecord[];
-}
+import {
+  fetchPlans,
+  fetchIngestionStatus,
+  ingestPlan,
+  searchPlanRecords,
+  type Plan,
+  type IngestionStatus,
+  type RateRecord,
+} from "./api/transparencyApi";
 
 export default function TransparencyExplorer() {
   const navigate = useNavigate();
@@ -55,7 +22,7 @@ export default function TransparencyExplorer() {
     useState<IngestionStatus | null>(null);
 
   const [billingCode, setBillingCode] = useState("");
-  const [npi, setNpi] = useState("");
+  const [description, setDescription] = useState("");
 
   const [results, setResults] = useState<RateRecord[]>([]);
   const [totalBillingResults, setTotalBillingResults] = useState(0);
@@ -72,22 +39,11 @@ export default function TransparencyExplorer() {
   useEffect(() => {
     async function loadPlans() {
       try {
-        const response = await fetch(
-          `${API_URL}/in-network-files/`
-        );
-
-        if (!response.ok) {
-          throw new Error("Unable to load plans");
-        }
-
-        const data = await response.json();
-
-        setPlans(
-          Array.isArray(data) ? data : data.results ?? data.plans ?? []
-        );
+        const data = await fetchPlans();
+        setPlans(data);
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Request failed"
+          err instanceof Error ? err.message : "Unable to load plans"
         );
       } finally {
         setLoadingPlans(false);
@@ -99,21 +55,7 @@ export default function TransparencyExplorer() {
 
   // Check ingestion status
   async function checkStatus(planKey: string) {
-    const response = await fetch(
-      `${API_URL}/plans/${planKey}/data/`
-    );
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        setIngestion(null);
-        return null;
-      }
-
-      throw new Error("Unable to check ingestion status");
-    }
-
-    const data: IngestionStatus = await response.json();
-
+    const data = await fetchIngestionStatus(planKey);
     setIngestion(data);
     return data;
   }
@@ -124,40 +66,37 @@ export default function TransparencyExplorer() {
       setIngestion(null);
       setResults([]);
       setTotalBillingResults(0);
+      setTotalNegotiatedResults(0);
       setHasSearched(false);
+      setError("");
       return;
     }
 
     setIngestion(null);
     setResults([]);
     setTotalBillingResults(0);
+    setTotalNegotiatedResults(0);
     setHasSearched(false);
     setError("");
 
     checkStatus(selectedPlan).catch((err) => {
-      setError(err.message);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to check ingestion status"
+      );
     });
   }, [selectedPlan]);
 
   // Trigger ingestion
-  async function ingestPlan() {
+  async function ingestSelectedPlan() {
     if (!selectedPlan) return;
 
     setIngesting(true);
     setError("");
 
     try {
-      const response = await fetch(
-        `${API_URL}/plans/${selectedPlan}/`,
-        { method: "GET" }
-      );
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "Ingestion failed");
-      }
-
+      await ingestPlan(selectedPlan);
       await checkStatus(selectedPlan);
     } catch (err) {
       setError(
@@ -192,43 +131,27 @@ export default function TransparencyExplorer() {
   }, [selectedPlan, ingestion?.status]);
 
   // Search records
-  async function searchRates(e: React.FormEvent) {
+  async function searchRates(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
-    // if (!selectedPlan || !billingCode.trim()) return;
+    if (!selectedPlan) return;
 
     setSearching(true);
     setError("");
     setResults([]);
     setTotalBillingResults(0);
+    setTotalNegotiatedResults(0);
     setHasSearched(true);
 
     try {
-        const params = new URLSearchParams();
+      const data = await searchPlanRecords(selectedPlan, {
+        billingCode,
+        description,
+      });
 
-        if (billingCode.trim()) {
-          params.set("billing_code", billingCode.trim());
-        }
-        
-        if (npi.trim()) {
-          params.set("description", npi.trim());
-        }
-
-      const response = await fetch(
-        `${API_URL}/plans/${selectedPlan}/search/?${params}`
-      );
-
-      const data: SearchResponse = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          (data as any).error || "Search failed"
-        );
-      }
-
-      setResults(data?.results || []);
-setTotalBillingResults(data?.unique_billing_codes);
-setTotalNegotiatedResults(data?.total_negotiated_rates)
+      setResults(data.results || []);
+      setTotalBillingResults(data.unique_billing_codes ?? 0);
+      setTotalNegotiatedResults(data.total_negotiated_rates ?? 0);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Search failed"
@@ -238,7 +161,7 @@ setTotalNegotiatedResults(data?.total_negotiated_rates)
     }
   }
 
-  const selectedPlanData = plans.find(
+  const selectedPlanData = plans?.find(
     (plan) => plan.plan_key === selectedPlan
   );
 
@@ -391,7 +314,7 @@ setTotalNegotiatedResults(data?.total_negotiated_rates)
                 </button>
               ) : (
                 <button
-                  onClick={ingestPlan}
+                  onClick={ingestSelectedPlan}
                   disabled={
                     ingesting ||
                     ["pending", "processing"].includes(
@@ -424,7 +347,7 @@ setTotalNegotiatedResults(data?.total_negotiated_rates)
               </h2>
 
               <p className="mt-1 text-sm text-slate-500">
-                Search by billing code and optionally narrow results to a provider.
+                Search by billing code and optionally narrow results by description.
               </p>
             </div>
 
@@ -449,9 +372,9 @@ setTotalNegotiatedResults(data?.total_negotiated_rates)
                   </label>
 
                   <input
-                    value={npi}
-                    onChange={(e) => setNpi(e.target.value)}
-                    placeholder="Enter 10-digit NPI"
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    placeholder="e.g. office visit"
                     className="w-full rounded-lg border border-slate-300 px-4 py-3 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                   />
                 </div>
@@ -477,16 +400,17 @@ setTotalNegotiatedResults(data?.total_negotiated_rates)
               </h2>
 
               <p className="mt-1 text-sm text-slate-500">
-                {totalBillingResults?.toLocaleString()} matching billing-code records
+                {totalBillingResults?.toLocaleString()} matching unique billing codes
               </p>
+
               <p className="mt-1 text-sm text-slate-500">
-                {totalNegotiatedResults?.toLocaleString()} matching Negotiated rates records
+                {totalNegotiatedResults?.toLocaleString()} matching negotiated price records
               </p>
             </div>
 
-            {results.length === 0 ? (
+            {results?.length === 0 ? (
               <p className="rounded-lg bg-slate-50 p-6 text-center text-sm text-slate-500">
-                No matching records found. Try another billing code.
+                No matching records found. Try another billing code or description.
               </p>
             ) : (
               <div className="overflow-x-auto">
@@ -502,7 +426,7 @@ setTotalNegotiatedResults(data?.total_negotiated_rates)
                   </thead>
 
                   <tbody>
-                    {results.flatMap((record, recordIndex) =>
+                    {results?.flatMap((record, recordIndex) =>
                       record.negotiated_rates?.flatMap(
                         (group, groupIndex) =>
                           group.negotiated_prices?.map(
